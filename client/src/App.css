@@ -1,0 +1,71 @@
+.App {
+  text-align: center;
+  background-color: #282c34;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: white;
+}
+
+h1 { margin-bottom: 10px; }
+
+.grid-container {
+  display: grid;
+  /* 核心：生成 20 列，每列等宽 */
+  grid-template-columns: repeat(20, 30px);
+  grid-template-rows: repeat(20, 30px);
+  gap: 2px;
+  background-color: #444;
+  padding: 10px;
+  border-radius: 8px;
+  border: 2px solid #666;
+}
+
+.grid-cell {
+  width: 30px;
+  height: 30px;
+  background-color: #555; /* 地面颜色 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  cursor: default;
+}
+
+.cell-content {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+/* Agent 样式 */
+.agent {
+  background-color: rgba(0, 255, 255, 0.2);
+  border-radius: 50%;
+}
+
+.agent-hp {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  font-size: 8px;
+  background-color: red;
+  color: white;
+  padding: 1px 2px;
+  border-radius: 4px;
+}
+
+/* 资源样式 */
+.resource {
+  animation: popIn 0.3s ease;
+}
+
+@keyframes popIn {
+  from { transform: scale(0); }
+  to { transform: scale(1); }
+}
