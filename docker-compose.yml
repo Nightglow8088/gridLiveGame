@@ -6,18 +6,22 @@ services:
     build: .
     container_name: pupupu-backend
     environment:
-      # 👇👇👇 记得把这里换成你真实的完整连接字符串！👇👇👇
-      - SPRING_DATA_MONGODB_URI=mongodb+srv://kevinB:MtBBPyxpKRMpmfyG@livinggrid.0b3gdw8.mongodb.net/pupupuDemo?appName=livingGrid
-      # 如果你的 API Token 不是写死在代码里的，也要在这里加一行：
-      # - API_TOKEN=eyJ...
-    expose:
-      - "8080" # 只在 Docker 网络内部暴露，外网访问不到，安全！
+      # 👇 【关键修改】硬编码云端专用数据库地址 👇
+      # 1. 数据库名改为: pupupu_CLOUD_PROD (与本地隔离)
+      # 2. 末尾加上: &readPreference=primary (防止瞬移)
+      - SPRING_DATA_MONGODB_URI=mongodb+srv://kevinB:MtBBPyxpKRMpmfyG@livinggrid.0b3gdw8.mongodb.net/pupupu_CLOUD_PROD?appName=livingGrid&readPreference=primary
 
-  # 前端服务 (兼反向代理)
+      # 如果你有 OpenAI/Azure 的 Key，也可以硬编码在这里，例如：
+      # - AZURE_OPENAI_KEY=sk-xxxxxxxx
+
+    expose:
+      - "8080" # 内部端口，安全
+
+  # 前端服务
   frontend:
     build: ./client
     container_name: pupupu-frontend
     ports:
-      - "8088:80" # 把容器的 80 映射到服务器的 8088
+      - "8088:80" # 对外暴露 8088 端口
     depends_on:
-      - backend # 确保后端先启动
+      - backend
