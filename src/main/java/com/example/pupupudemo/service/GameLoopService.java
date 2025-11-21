@@ -45,7 +45,8 @@ public class GameLoopService {
         }
     }
 
-    @Scheduled(fixedRate = 5000)
+    // 修改 1: 频率改为 2000ms (2秒)，配合前端动画
+    @Scheduled(fixedRate = 2000)
     public void runGameTurn() {
         log("----- 新回合开始 -----");
         int hpCost = liveDataService.getHpCostPerTurn();
@@ -55,8 +56,11 @@ public class GameLoopService {
 
         List<Agent> agents = agentRepository.findAll();
         List<WorldResource> allResources = resourceRepository.findAll();
-        // ⚠️ 获取当前所有出口的内存快照，用于防止“一个出口跑两个人”的情况
         List<WorldExit> allExits = exitRepository.findAll();
+
+        // 用于批量操作的列表 (优化 IO 性能)
+        List<Agent> agentsToSave = new ArrayList<>();
+        List<Agent> agentsToDelete = new ArrayList<>();
 
         for (Agent agent : agents) {
             boolean hasAxe = agent.getInventory().getOrDefault("Axe", 0) > 0;
@@ -71,20 +75,19 @@ public class GameLoopService {
                 log("🍞 " + agent.getName() + " 进食回血 (HP=" + agent.getLifespan() + ")");
             } else {
                 agent.setLifespan(agent.getLifespan() - hpCost);
-                log("⚠️ " + agent.getName() + " 正在挨饿 (HP=" + agent.getLifespan() + ")");
             }
 
             if (agent.getLifespan() <= 0) {
                 log("💀 " + agent.getName() + (hasAxe ? " 带着斧头遗憾离世。" : " 饿死了。"));
-                agentRepository.delete(agent);
+                agentsToDelete.add(agent);
                 continue;
             }
 
             // =================================================
-            // 2. 视野逻辑 (Resources + Exits)
+            // 2. 视野逻辑 (修复: 找回丢失的 resourceUnderFeet 定义)
             // =================================================
             List<String> visibleItems = new ArrayList<>();
-            WorldResource resourceUnderFeet = null;
+            WorldResource resourceUnderFeet = null; // <--- 这里定义了
 
             // A. 找资源 (3x3)
             for (WorldResource res : allResources) {
@@ -116,7 +119,7 @@ public class GameLoopService {
             String envDescription = visibleItems.isEmpty() ? "Nothing nearby" : "You see: " + String.join(", ", visibleItems);
 
             // =================================================
-            // 3. 构建 Prompt
+            // 3. 构建 Prompt (修复: 找回丢失的 agentState 定义)
             // =================================================
             String instructions;
             if (hasAxe) {
@@ -125,6 +128,7 @@ public class GameLoopService {
                 instructions = "Goal: Survive. Harvest Wheat. Craft Axe (need 2 Stone). EXPLORE THE CENTER OF MAP, do not hug walls.";
             }
 
+            // <--- 这里定义了 agentState
             String agentState = String.format("""
                 {
                     "id": "%s", "hp": %d, "inventory": %s,
@@ -145,7 +149,7 @@ public class GameLoopService {
                 executeAction(agent, action, decision, resourceUnderFeet, agents, hasAxe);
 
                 // =================================================
-                // 🔥 6. 自动逃生检测 (Auto-Trigger) - 修复并发删除问题
+                // 6. 自动逃生检测
                 // =================================================
                 boolean escaped = false;
                 for (WorldExit exit : allExits) {
@@ -153,30 +157,41 @@ public class GameLoopService {
                     if (exit.getX() == agent.getX() && exit.getY() == agent.getY() && hasAxe) {
                         log("🚀🚀🚀 " + agent.getName() + " 成功带着斧头逃离了矩阵！(HP=" + agent.getLifespan() + ")");
 
-                        // 1. 数据库操作：删除 Agent 和 Exit
-                        agentRepository.delete(agent);
+                        // 标记删除
+                        agentsToDelete.add(agent);
                         exitRepository.delete(exit);
 
-                        // 2. 🔥 内存操作：从当前回合的 exits 列表中移除，防止后续 agent 重复使用
+                        // 内存操作：从当前回合的 exits 列表中移除
                         allExits.remove(exit);
 
                         escaped = true;
-                        break; // 逃生成功，停止检测其他出口
+                        break;
                     }
                 }
 
                 if (escaped) continue;
 
+                // 没死也没逃走，加入待保存列表
+                agentsToSave.add(agent);
+
             } catch (Exception e) {
                 System.err.println("AI Error: " + e.getMessage());
-            }
-
-            if (agentRepository.existsById(agent.getId())) {
-                agentRepository.save(agent);
+                // 即使出错，状态可能也变了，也需要保存
+                agentsToSave.add(agent);
             }
         }
 
-        // 🔥 7. 生态维护
+        // =================================================
+        // 修改 2: 批量数据库操作 (减少 IO 消耗)
+        // =================================================
+        if (!agentsToDelete.isEmpty()) {
+            agentRepository.deleteAll(agentsToDelete);
+        }
+        if (!agentsToSave.isEmpty()) {
+            agentRepository.saveAll(agentsToSave);
+        }
+
+        // 7. 生态维护
         checkAndRespawnAgents();
         checkAndRespawnResources();
         checkAndRespawnExits();

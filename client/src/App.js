@@ -62,6 +62,7 @@ const styles = {
         boxShadow: 'inset 0 2px 5px rgba(0,0,0,0.2)',
     },
     statItem: { color: '#a0a0a0' },
+
     // 网格容器
     gridBoard: {
         display: 'grid',
@@ -69,9 +70,10 @@ const styles = {
         gridTemplateRows: 'repeat(20, 25px)',    // 20行，每行25px
         gap: '2px',
         backgroundColor: '#111',
-        padding: '10px',
+        padding: '10px', // 注意：这里的padding会影响绝对定位的偏移量
         borderRadius: '8px',
         border: '2px solid #444',
+        position: 'relative', // 【关键】设置为相对定位，作为悬浮Agent的坐标原点
     },
     // 单个格子
     gridCell: {
@@ -89,6 +91,20 @@ const styles = {
     cellContent: {
         width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative'
     },
+    // 【新增】悬浮Agent样式 (解决瞬移问题)
+    floatingAgent: {
+        position: 'absolute',
+        width: '25px',
+        height: '25px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '50%',
+        transition: 'all 0.5s ease-in-out', // 【核心】平滑移动动画
+        zIndex: 100, // 保证在最上层
+        // left 和 top 由代码动态计算
+    },
+
     agent: { backgroundColor: 'rgba(0, 191, 255, 0.2)', borderRadius: '50%' },
     agentArmed: { backgroundColor: 'rgba(255, 69, 0, 0.3)', boxShadow: '0 0 8px rgba(255, 69, 0, 0.6)', transform: 'scale(1.1)', zIndex: 10 },
     agentHp: {
@@ -145,8 +161,6 @@ function App() {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                // 这里的路径 /api/gamestate 依赖于 Nginx 反向代理或者 package.json 中的 proxy
-                // 如果在本地开发且没配 proxy，可能需要改回 http://localhost:8080/api/gamestate
                 const response = await axios.get('/api/gamestate');
                 setGameState(response.data);
             } catch (error) {
@@ -155,7 +169,7 @@ function App() {
         };
 
         fetchData();
-        const interval = setInterval(fetchData, 500); // 500ms 刷新一次，保证移动流畅
+        const interval = setInterval(fetchData, 500); // 500ms 刷新一次
         return () => clearInterval(interval);
     }, []);
 
@@ -182,32 +196,15 @@ function App() {
         return { ...styles.logEntry, color, fontWeight };
     };
 
-    // 4. 渲染格子
+    // 4. 渲染格子 (只负责渲染 资源 和 出口，Agent 移交给悬浮层)
     const renderCell = (x, y) => {
-        // A. Agent (最高层级)
-        const agent = gameState.agents.find(a => a.x === x && a.y === y && a.isAlive);
-        if (agent) {
-            const hasAxe = agent.inventory && agent.inventory.Axe > 0;
-            // 合并样式
-            const agentStyle = hasAxe
-                ? { ...styles.cellContent, ...styles.agent, ...styles.agentArmed }
-                : { ...styles.cellContent, ...styles.agent };
-
-            return (
-                <div style={agentStyle} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
-                    {hasAxe ? '🪓' : '🤖'}
-                    <span style={styles.agentHp}>{agent.lifespan}</span>
-                </div>
-            );
-        }
-
-        // B. Exit (出口)
+        // A. Exit (出口)
         const exit = gameState.exits && gameState.exits.find(e => e.x === x && e.y === y);
         if (exit) {
             return <div style={{...styles.cellContent, ...styles.exit}} title="EXIT">🚪</div>;
         }
 
-        // C. Resource (资源)
+        // B. Resource (资源)
         const resource = gameState.resources.find(r => r.x === x && r.y === y);
         if (resource) {
             return (
@@ -220,7 +217,7 @@ function App() {
         return null;
     };
 
-    // 生成网格
+    // 生成静态网格背景
     const grid = [];
     for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
@@ -249,7 +246,33 @@ function App() {
                     </div>
 
                     <div style={styles.gridBoard}>
+                        {/* 1. 渲染基础网格 */}
                         {grid}
+
+                        {/* 2. 【新增】悬浮渲染 Agents 层 */}
+                        {gameState.agents.filter(a => a.isAlive).map(agent => {
+                            // 动态计算位置：Padding(10) + 坐标 * (Size(25) + Gap(2))
+                            const leftPos = 10 + agent.x * 27;
+                            const topPos = 10 + agent.y * 27;
+
+                            const hasAxe = agent.inventory && agent.inventory.Axe > 0;
+
+                            // 合并样式：基础悬浮 + Agent类型 + 武器发光 + 坐标定位
+                            const agentFinalStyle = {
+                                ...styles.floatingAgent,
+                                ...styles.agent,
+                                ...(hasAxe ? styles.agentArmed : {}),
+                                left: `${leftPos}px`,
+                                top: `${topPos}px`,
+                            };
+
+                            return (
+                                <div key={agent.id} style={agentFinalStyle} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
+                                    {hasAxe ? '🪓' : '🤖'}
+                                    <span style={styles.agentHp}>{agent.lifespan}</span>
+                                </div>
+                            );
+                        })}
                     </div>
                 </div>
 
