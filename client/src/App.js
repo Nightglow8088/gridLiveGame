@@ -19,7 +19,8 @@ function App() {
         const fetchData = async () => {
             try {
                 // 确保后端地址正确
-                const response = await axios.get('http://localhost:8080/api/gamestate');
+                // const response = await axios.get('http://localhost:8080/api/gamestate');
+                const response = await axios.get('/api/gamestate');
                 setGameState(response.data);
             } catch (error) {
                 console.error("Error fetching game state:", error);
