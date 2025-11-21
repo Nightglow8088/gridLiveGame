@@ -55,6 +55,7 @@ public class GameLoopService {
 
         List<Agent> agents = agentRepository.findAll();
         List<WorldResource> allResources = resourceRepository.findAll();
+        // ⚠️ 获取当前所有出口的内存快照，用于防止“一个出口跑两个人”的情况
         List<WorldExit> allExits = exitRepository.findAll();
 
         for (Agent agent : agents) {
@@ -106,7 +107,6 @@ public class GameLoopService {
                 if (dx == 0 && dy == 0) {
                     visibleItems.add("STANDING_ON EXIT");
                 } else if (dx <= visionRange && dy <= visionRange) {
-                    // 只有拿着斧头或者紧邻出口时才能看见
                     if (hasAxe || (dx <= 1 && dy <= 1)) {
                         visibleItems.add("EXIT at (" + exit.getX() + "," + exit.getY() + ")");
                     }
@@ -116,7 +116,7 @@ public class GameLoopService {
             String envDescription = visibleItems.isEmpty() ? "Nothing nearby" : "You see: " + String.join(", ", visibleItems);
 
             // =================================================
-            // 3. 构建 Prompt (针对边缘问题进行了优化)
+            // 3. 构建 Prompt
             // =================================================
             String instructions;
             if (hasAxe) {
@@ -145,19 +145,23 @@ public class GameLoopService {
                 executeAction(agent, action, decision, resourceUnderFeet, agents, hasAxe);
 
                 // =================================================
-                // 🔥 6. 自动逃生检测 (Auto-Trigger)
+                // 🔥 6. 自动逃生检测 (Auto-Trigger) - 修复并发删除问题
                 // =================================================
                 boolean escaped = false;
                 for (WorldExit exit : allExits) {
+                    // 检查坐标重合 + 有斧头
                     if (exit.getX() == agent.getX() && exit.getY() == agent.getY() && hasAxe) {
                         log("🚀🚀🚀 " + agent.getName() + " 成功带着斧头逃离了矩阵！(HP=" + agent.getLifespan() + ")");
 
-                        // 删除数据
+                        // 1. 数据库操作：删除 Agent 和 Exit
                         agentRepository.delete(agent);
                         exitRepository.delete(exit);
 
+                        // 2. 🔥 内存操作：从当前回合的 exits 列表中移除，防止后续 agent 重复使用
+                        allExits.remove(exit);
+
                         escaped = true;
-                        break; // 跳出出口循环
+                        break; // 逃生成功，停止检测其他出口
                     }
                 }
 
@@ -167,7 +171,6 @@ public class GameLoopService {
                 System.err.println("AI Error: " + e.getMessage());
             }
 
-            // 如果还活着且没逃走，保存状态
             if (agentRepository.existsById(agent.getId())) {
                 agentRepository.save(agent);
             }
@@ -193,12 +196,10 @@ public class GameLoopService {
                 if ("LEFT".equalsIgnoreCase(dir)) newX--;
                 if ("RIGHT".equalsIgnoreCase(dir)) newX++;
 
-                // 如果 AI 的移动是有效的，就执行
                 if (isValidMove(newX, newY) && !isOccupied(newX, newY, allAgents)) {
                     agent.setX(newX); agent.setY(newY);
                     if (hasAxe) log("🏃 " + agent.getName() + " (持斧) -> " + dir + " (" + newX + "," + newY + ")");
                 } else {
-                    // ⚠️ 关键：如果 AI 撞墙或者发呆，我们用“智能防卡死”推它一把
                     forceSmartRandomMove(agent, allAgents);
                 }
             }
@@ -268,7 +269,7 @@ public class GameLoopService {
         return false;
     }
 
-    // 🔥 核心改进：智能随机移动 (专门解决边缘徘徊问题)
+    // 🔥 核心改进：彻底防止边缘卡死
     private void forceSmartRandomMove(Agent agent, List<Agent> allAgents) {
         int currentX = agent.getX();
         int currentY = agent.getY();
@@ -278,29 +279,17 @@ public class GameLoopService {
         int[] dy = {-1, 1, 0, 0};
 
         List<Integer> directions = new ArrayList<>();
-        for(int i=0; i<4; i++) directions.add(i);
 
-        // --- 边缘检测与权重调整 ---
-        // 如果在地图边缘，我们将“反方向”移动到列表的最前面
-        // 这样循环尝试时，大概率会先选中那个能离开边缘的方向
+        // 🔥 彻底移除无效方向：如果在边缘，根本不把撞墙的方向加入候选列表
+        if (currentY > 0) directions.add(0);  // UP (只有不在最上面才能往上)
+        if (currentY < 19) directions.add(1); // DOWN
+        if (currentX > 0) directions.add(2);  // LEFT
+        if (currentX < 19) directions.add(3); // RIGHT
 
-        if (currentY == 0) { // 顶端 -> 优先 DOWN (1)
-            directions.remove(Integer.valueOf(1));
-            directions.add(0, 1);
-        } else if (currentY == 19) { // 底端 -> 优先 UP (0)
-            directions.remove(Integer.valueOf(0));
-            directions.add(0, 0);
-        }
+        // 打乱顺序，实现随机选择
+        Collections.shuffle(directions);
 
-        if (currentX == 0) { // 左端 -> 优先 RIGHT (3)
-            directions.remove(Integer.valueOf(3));
-            directions.add(0, 3);
-        } else if (currentX == 19) { // 右端 -> 优先 LEFT (2)
-            directions.remove(Integer.valueOf(2));
-            directions.add(0, 2);
-        }
-
-        // 尝试按调整后的优先级移动
+        // 尝试移动
         for (int dirIndex : directions) {
             int tryX = currentX + dx[dirIndex];
             int tryY = currentY + dy[dirIndex];
@@ -308,7 +297,7 @@ public class GameLoopService {
             if (isValidMove(tryX, tryY) && !isOccupied(tryX, tryY, allAgents)) {
                 agent.setX(tryX);
                 agent.setY(tryY);
-                // log("🔀 自动修正: " + agent.getName() + " 离开边缘"); // 可选日志
+                log("🔀 " + agent.getName() + " 自动修正路线 (" + tryX + "," + tryY + ")");
                 return;
             }
         }

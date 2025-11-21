@@ -89,7 +89,7 @@ const styles = {
     cellContent: {
         width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative'
     },
-    agent: { backgroundColor: 'rgba(0, 191, 255, 0.2)', borderRadius: '50%', transition: 'all 0.3s ease' },
+    agent: { backgroundColor: 'rgba(0, 191, 255, 0.2)', borderRadius: '50%' },
     agentArmed: { backgroundColor: 'rgba(255, 69, 0, 0.3)', boxShadow: '0 0 8px rgba(255, 69, 0, 0.6)', transform: 'scale(1.1)', zIndex: 10 },
     agentHp: {
         position: 'absolute', bottom: '-2px', right: '-4px', fontSize: '7px',
