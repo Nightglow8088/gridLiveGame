@@ -1,25 +1,152 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import './App.css';
+
+// --- 1. 全局样式 (动画、滚动条) ---
+const globalStyles = `
+  body { margin: 0; padding: 0; background: #1a1a1a; font-family: 'Segoe UI', sans-serif; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: #0f0f0f; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+  
+  @keyframes popIn {
+    from { transform: scale(0); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+  @keyframes pulse {
+    0% { transform: scale(1); filter: drop-shadow(0 0 0 rgba(0,255,0,0.4)); }
+    50% { transform: scale(1.1); filter: drop-shadow(0 0 5px rgba(0,255,0,0.8)); }
+    100% { transform: scale(1); filter: drop-shadow(0 0 0 rgba(0,255,0,0.4)); }
+  }
+`;
+
+// --- 2. 组件内联样式对象 ---
+const styles = {
+    app: {
+        textAlign: 'center',
+        backgroundColor: '#1a1a1a',
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'white',
+    },
+    title: {
+        marginBottom: '20px',
+        fontSize: '2.5rem',
+        color: '#e0e0e0',
+        textShadow: '0 2px 4px rgba(0,0,0,0.5)',
+    },
+    mainLayout: {
+        display: 'flex',
+        gap: '30px',
+        padding: '20px',
+        backgroundColor: '#2d2d2d',
+        borderRadius: '15px',
+        boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+    },
+    // 左侧游戏区
+    gameSection: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '15px',
+    },
+    statsBar: {
+        display: 'flex',
+        justifyContent: 'space-around',
+        backgroundColor: '#3d3d3d',
+        padding: '10px',
+        borderRadius: '8px',
+        fontWeight: 'bold',
+        boxShadow: 'inset 0 2px 5px rgba(0,0,0,0.2)',
+    },
+    statItem: { color: '#a0a0a0' },
+    // 网格容器
+    gridBoard: {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(20, 25px)', // 20列，每列25px
+        gridTemplateRows: 'repeat(20, 25px)',    // 20行，每行25px
+        gap: '2px',
+        backgroundColor: '#111',
+        padding: '10px',
+        borderRadius: '8px',
+        border: '2px solid #444',
+    },
+    // 单个格子
+    gridCell: {
+        width: '25px',
+        height: '25px',
+        backgroundColor: '#2a2a2a',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: '16px',
+        borderRadius: '2px',
+        position: 'relative',
+    },
+    // 实体样式
+    cellContent: {
+        width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative'
+    },
+    agent: { backgroundColor: 'rgba(0, 191, 255, 0.2)', borderRadius: '50%', transition: 'all 0.3s ease' },
+    agentArmed: { backgroundColor: 'rgba(255, 69, 0, 0.3)', boxShadow: '0 0 8px rgba(255, 69, 0, 0.6)', transform: 'scale(1.1)', zIndex: 10 },
+    agentHp: {
+        position: 'absolute', bottom: '-2px', right: '-4px', fontSize: '7px',
+        backgroundColor: '#ff3333', color: 'white', padding: '0 2px', borderRadius: '3px', zIndex: 20
+    },
+    resource: { animation: 'popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)' },
+    exit: { backgroundColor: 'rgba(0, 255, 0, 0.1)', fontSize: '18px', animation: 'pulse 2s infinite' },
+
+    // 右侧日志区
+    logSection: {
+        width: '320px',
+        height: '600px',
+        backgroundColor: '#0f0f0f',
+        borderRadius: '8px',
+        border: '1px solid #333',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        fontFamily: "'Consolas', 'Monaco', monospace",
+    },
+    logHeader: {
+        backgroundColor: '#1f1f1f', margin: 0, padding: '10px', fontSize: '1rem',
+        color: '#00ff00', borderBottom: '1px solid #333', textAlign: 'left'
+    },
+    logContainer: {
+        flex: 1, overflowY: 'auto', padding: '10px', textAlign: 'left',
+        fontSize: '12px', color: '#cccccc', scrollBehavior: 'smooth'
+    },
+    logEntry: { marginBottom: '4px', paddingBottom: '4px', borderBottom: '1px solid #222', lineHeight: '1.4', wordBreak: 'break-word' },
+};
+
+// --- 3. 日志颜色配置 ---
+const logColors = {
+    harvest: '#ffd700', // 金色
+    death: '#ff4444',   // 红色
+    craft: '#00bfff',   // 蓝色
+    escape: '#00ff00',  // 绿色
+    eat: '#ffcc99',     // 小麦色
+    warn: '#ff8800',    // 橙色
+    move: '#808080',    // 灰色
+    default: '#cccccc'
+};
 
 function App() {
-    // 初始状态：包含 agent, 资源, 出口, 日志
     const [gameState, setGameState] = useState({
-        agents: [],
-        resources: [],
-        exits: [],
-        logs: []
+        agents: [], resources: [], exits: [], logs: []
     });
 
-    const logContainerRef = useRef(null); // 用于日志自动滚动
-    const gridSize = 20; // 20x20 网格
+    const logContainerRef = useRef(null);
+    const gridSize = 20;
 
-    // 每 1 秒轮询后端接口
+    // 1. 轮询后端数据
     useEffect(() => {
         const fetchData = async () => {
             try {
-                // 确保后端地址正确
-                // const response = await axios.get('http://localhost:8080/api/gamestate');
+                // 这里的路径 /api/gamestate 依赖于 Nginx 反向代理或者 package.json 中的 proxy
+                // 如果在本地开发且没配 proxy，可能需要改回 http://localhost:8080/api/gamestate
                 const response = await axios.get('/api/gamestate');
                 setGameState(response.data);
             } catch (error) {
@@ -27,71 +154,78 @@ function App() {
             }
         };
 
-        fetchData(); // 立即执行一次
-        const interval = setInterval(fetchData, 1000); // 每秒刷新
+        fetchData();
+        const interval = setInterval(fetchData, 500); // 500ms 刷新一次，保证移动流畅
         return () => clearInterval(interval);
     }, []);
 
-    // 当日志更新时，自动滚动到底部
+    // 2. 日志自动滚动
     useEffect(() => {
         if (logContainerRef.current) {
             logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
         }
     }, [gameState.logs]);
 
-    // 辅助函数：根据日志内容返回对应的 class
-    const getLogClass = (log) => {
-        if (log.includes("🎉")) return "log-entry log-harvest";
-        if (log.includes("💀")) return "log-entry log-death";
-        if (log.includes("🔨")) return "log-entry log-craft";
-        if (log.includes("🚀")) return "log-entry log-escape";
-        if (log.includes("🍞")) return "log-entry log-eat";
-        if (log.includes("⚠️")) return "log-entry log-warn";
-        return "log-entry";
+    // 3. 获取日志样式
+    const getLogStyle = (log) => {
+        let color = logColors.default;
+        let fontWeight = 'normal';
+
+        if (log.includes("🎉")) color = logColors.harvest;
+        else if (log.includes("💀")) color = logColors.death;
+        else if (log.includes("🔨")) color = logColors.craft;
+        else if (log.includes("🚀")) { color = logColors.escape; fontWeight = 'bold'; }
+        else if (log.includes("🍞")) color = logColors.eat;
+        else if (log.includes("⚠️")) color = logColors.warn;
+        else if (log.includes("🏃")) color = logColors.move;
+
+        return { ...styles.logEntry, color, fontWeight };
     };
 
-    // 核心渲染逻辑：决定每个格子显示什么
+    // 4. 渲染格子
     const renderCell = (x, y) => {
-        // 1. 渲染 Agent (优先级最高，覆盖在最上层)
+        // A. Agent (最高层级)
         const agent = gameState.agents.find(a => a.x === x && a.y === y && a.isAlive);
         if (agent) {
-            // 检查是否持有斧头 (Axe)
             const hasAxe = agent.inventory && agent.inventory.Axe > 0;
+            // 合并样式
+            const agentStyle = hasAxe
+                ? { ...styles.cellContent, ...styles.agent, ...styles.agentArmed }
+                : { ...styles.cellContent, ...styles.agent };
+
             return (
-                <div className={`cell-content agent ${hasAxe ? 'armed' : ''}`} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
-                    {/* 持有斧头显示 🪓，否则显示 🤖 */}
+                <div style={agentStyle} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
                     {hasAxe ? '🪓' : '🤖'}
-                    <span className="agent-hp">{agent.lifespan}</span>
+                    <span style={styles.agentHp}>{agent.lifespan}</span>
                 </div>
             );
         }
 
-        // 2. 渲染出口 (Exit) - 优先级第二
+        // B. Exit (出口)
         const exit = gameState.exits && gameState.exits.find(e => e.x === x && e.y === y);
         if (exit) {
-            return <div className="cell-content exit" title="EXIT">🚪</div>;
+            return <div style={{...styles.cellContent, ...styles.exit}} title="EXIT">🚪</div>;
         }
 
-        // 3. 渲染资源 (Resource) - 优先级最低
+        // C. Resource (资源)
         const resource = gameState.resources.find(r => r.x === x && r.y === y);
         if (resource) {
             return (
-                <div className="cell-content resource" title={resource.type}>
+                <div style={{...styles.cellContent, ...styles.resource}} title={resource.type}>
                     {resource.type === 'Wheat' ? '🌾' : '🪨'}
                 </div>
             );
         }
 
-        // 空格子
         return null;
     };
 
-    // 生成网格数组
+    // 生成网格
     const grid = [];
     for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
             grid.push(
-                <div key={`${x}-${y}`} className="grid-cell">
+                <div key={`${x}-${y}`} style={styles.gridCell}>
                     {renderCell(x, y)}
                 </div>
             );
@@ -99,36 +233,40 @@ function App() {
     }
 
     return (
-        <div className="App">
-            <h1>The Living Grid 🌍</h1>
+        <div style={styles.app}>
+            {/* 注入全局动画样式 */}
+            <style>{globalStyles}</style>
 
-            <div className="main-layout">
+            <h1 style={styles.title}>The Living Grid 🌍</h1>
 
+            <div style={styles.mainLayout}>
                 {/* 左侧：游戏区域 */}
-                <div className="game-section">
-                    <div className="stats-bar">
-                        <span className="stat-item">🤖 Agents: {gameState.agents.filter(a => a.isAlive).length}</span>
-                        <span className="stat-item">🌱 Resources: {gameState.resources.length}</span>
-                        <span className="stat-item">🚪 Exits: {gameState.exits ? gameState.exits.length : 0}</span>
+                <div style={styles.gameSection}>
+                    <div style={styles.statsBar}>
+                        <span style={styles.statItem}>🤖 Agents: {gameState.agents.filter(a => a.isAlive).length}</span>
+                        <span style={styles.statItem}>🌱 Resources: {gameState.resources.length}</span>
+                        <span style={styles.statItem}>🚪 Exits: {gameState.exits ? gameState.exits.length : 0}</span>
                     </div>
 
-                    <div className="grid-board">
+                    <div style={styles.gridBoard}>
                         {grid}
                     </div>
                 </div>
 
                 {/* 右侧：日志控制台 */}
-                <div className="log-section">
-                    <h3>System Logs</h3>
-                    <div className="log-container" ref={logContainerRef}>
+                <div style={styles.logSection}>
+                    <h3 style={styles.logHeader}>System Logs</h3>
+                    <div style={styles.logContainer} ref={logContainerRef}>
                         {gameState.logs && gameState.logs.length > 0 ? (
                             gameState.logs.map((log, index) => (
-                                <div key={index} className={getLogClass(log)}>
+                                <div key={index} style={getLogStyle(log)}>
                                     {log}
                                 </div>
                             ))
                         ) : (
-                            <div className="log-entry waiting">Waiting for server logs...</div>
+                            <div style={{...styles.logEntry, color: '#666', textAlign: 'center', marginTop: '20px'}}>
+                                Waiting for server logs...
+                            </div>
                         )}
                     </div>
                 </div>
