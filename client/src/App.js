@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
-// --- 1. 全局样式 (动画、滚动条) ---
+// --- 1. 全局样式 ---
 const globalStyles = `
   body { margin: 0; padding: 0; background: #1a1a1a; font-family: 'Segoe UI', sans-serif; }
   ::-webkit-scrollbar { width: 8px; }
@@ -20,7 +20,7 @@ const globalStyles = `
   }
 `;
 
-// --- 2. 组件内联样式对象 ---
+// --- 2. 样式对象 ---
 const styles = {
     app: {
         textAlign: 'center',
@@ -46,7 +46,6 @@ const styles = {
         borderRadius: '15px',
         boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
     },
-    // 左侧游戏区
     gameSection: {
         display: 'flex',
         flexDirection: 'column',
@@ -63,19 +62,17 @@ const styles = {
     },
     statItem: { color: '#a0a0a0' },
 
-    // 网格容器
     gridBoard: {
         display: 'grid',
-        gridTemplateColumns: 'repeat(20, 25px)', // 20列，每列25px
-        gridTemplateRows: 'repeat(20, 25px)',    // 20行，每行25px
+        gridTemplateColumns: 'repeat(20, 25px)',
+        gridTemplateRows: 'repeat(20, 25px)',
         gap: '2px',
         backgroundColor: '#111',
-        padding: '10px', // 注意：这里的padding会影响绝对定位的偏移量
+        padding: '10px',
         borderRadius: '8px',
         border: '2px solid #444',
-        position: 'relative', // 【关键】设置为相对定位，作为悬浮Agent的坐标原点
+        position: 'relative',
     },
-    // 单个格子
     gridCell: {
         width: '25px',
         height: '25px',
@@ -87,11 +84,10 @@ const styles = {
         borderRadius: '2px',
         position: 'relative',
     },
-    // 实体样式
     cellContent: {
         width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative'
     },
-    // 【新增】悬浮Agent样式 (解决瞬移问题)
+    // 悬浮 Agent 样式
     floatingAgent: {
         position: 'absolute',
         width: '25px',
@@ -100,9 +96,9 @@ const styles = {
         alignItems: 'center',
         justifyContent: 'center',
         borderRadius: '50%',
-        transition: 'all 0.5s ease-in-out', // 【核心】平滑移动动画
-        zIndex: 100, // 保证在最上层
-        // left 和 top 由代码动态计算
+        // 使用 ease-out 让移动在结束时平滑减速，掩盖网络延迟造成的小顿挫
+        transition: 'all 0.5s ease-out',
+        zIndex: 100,
     },
 
     agent: { backgroundColor: 'rgba(0, 191, 255, 0.2)', borderRadius: '50%' },
@@ -114,7 +110,6 @@ const styles = {
     resource: { animation: 'popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275)' },
     exit: { backgroundColor: 'rgba(0, 255, 0, 0.1)', fontSize: '18px', animation: 'pulse 2s infinite' },
 
-    // 右侧日志区
     logSection: {
         width: '320px',
         height: '600px',
@@ -137,16 +132,9 @@ const styles = {
     logEntry: { marginBottom: '4px', paddingBottom: '4px', borderBottom: '1px solid #222', lineHeight: '1.4', wordBreak: 'break-word' },
 };
 
-// --- 3. 日志颜色配置 ---
 const logColors = {
-    harvest: '#ffd700', // 金色
-    death: '#ff4444',   // 红色
-    craft: '#00bfff',   // 蓝色
-    escape: '#00ff00',  // 绿色
-    eat: '#ffcc99',     // 小麦色
-    warn: '#ff8800',    // 橙色
-    move: '#808080',    // 灰色
-    default: '#cccccc'
+    harvest: '#ffd700', death: '#ff4444', craft: '#00bfff', escape: '#00ff00',
+    eat: '#ffcc99', warn: '#ff8800', move: '#808080', default: '#cccccc'
 };
 
 function App() {
@@ -157,34 +145,61 @@ function App() {
     const logContainerRef = useRef(null);
     const gridSize = 20;
 
-    // 1. 轮询后端数据
+    // 🔥 核心优化：智能轮询 + 防缓存 + 防抖
     useEffect(() => {
+        let isMounted = true;
+        let timeoutId = null;
+
         const fetchData = async () => {
             try {
-                const response = await axios.get('/api/gamestate');
-                setGameState(response.data);
+                // 1. 防缓存：添加时间戳，强制获取最新数据
+                const response = await axios.get(`/api/gamestate?_t=${Date.now()}`);
+
+                if (isMounted) {
+                    // 2. 防抖检查：只有数据真的变了才更新 State，防止打断 CSS 动画
+                    setGameState(prevState => {
+                        // 简单生成“指纹”来对比 Agent 位置变化
+                        const newAgentsFingerprint = response.data.agents.map(a => `${a.id}_${a.x}_${a.y}`).join('|');
+                        const oldAgentsFingerprint = prevState.agents.map(a => `${a.id}_${a.x}_${a.y}`).join('|');
+
+                        const logsChanged = response.data.logs.length !== prevState.logs.length;
+                        const resourcesChanged = response.data.resources.length !== prevState.resources.length;
+
+                        // 如果核心数据没变，就直接返回旧 State，这样 React 就不会重新渲染 DOM
+                        if (newAgentsFingerprint === oldAgentsFingerprint && !logsChanged && !resourcesChanged) {
+                            return prevState;
+                        }
+                        return response.data;
+                    });
+                }
             } catch (error) {
                 console.error("Error fetching game state:", error);
+            } finally {
+                // 3. 智能轮询：等这次请求完了，再约下一次
+                if (isMounted) {
+                    timeoutId = setTimeout(fetchData, 500);
+                }
             }
         };
 
         fetchData();
-        const interval = setInterval(fetchData, 500); // 500ms 刷新一次
-        return () => clearInterval(interval);
+
+        return () => {
+            isMounted = false;
+            if (timeoutId) clearTimeout(timeoutId);
+        };
     }, []);
 
-    // 2. 日志自动滚动
+    // 日志自动滚动
     useEffect(() => {
         if (logContainerRef.current) {
             logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
         }
     }, [gameState.logs]);
 
-    // 3. 获取日志样式
     const getLogStyle = (log) => {
         let color = logColors.default;
         let fontWeight = 'normal';
-
         if (log.includes("🎉")) color = logColors.harvest;
         else if (log.includes("💀")) color = logColors.death;
         else if (log.includes("🔨")) color = logColors.craft;
@@ -192,32 +207,22 @@ function App() {
         else if (log.includes("🍞")) color = logColors.eat;
         else if (log.includes("⚠️")) color = logColors.warn;
         else if (log.includes("🏃")) color = logColors.move;
-
         return { ...styles.logEntry, color, fontWeight };
     };
 
-    // 4. 渲染格子 (只负责渲染 资源 和 出口，Agent 移交给悬浮层)
     const renderCell = (x, y) => {
-        // A. Exit (出口)
         const exit = gameState.exits && gameState.exits.find(e => e.x === x && e.y === y);
-        if (exit) {
-            return <div style={{...styles.cellContent, ...styles.exit}} title="EXIT">🚪</div>;
-        }
+        if (exit) return <div style={{...styles.cellContent, ...styles.exit}} title="EXIT">🚪</div>;
 
-        // B. Resource (资源)
         const resource = gameState.resources.find(r => r.x === x && r.y === y);
-        if (resource) {
-            return (
-                <div style={{...styles.cellContent, ...styles.resource}} title={resource.type}>
-                    {resource.type === 'Wheat' ? '🌾' : '🪨'}
-                </div>
-            );
-        }
-
+        if (resource) return (
+            <div style={{...styles.cellContent, ...styles.resource}} title={resource.type}>
+                {resource.type === 'Wheat' ? '🌾' : '🪨'}
+            </div>
+        );
         return null;
     };
 
-    // 生成静态网格背景
     const grid = [];
     for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
@@ -231,13 +236,10 @@ function App() {
 
     return (
         <div style={styles.app}>
-            {/* 注入全局动画样式 */}
             <style>{globalStyles}</style>
-
             <h1 style={styles.title}>The Living Grid 🌍</h1>
 
             <div style={styles.mainLayout}>
-                {/* 左侧：游戏区域 */}
                 <div style={styles.gameSection}>
                     <div style={styles.statsBar}>
                         <span style={styles.statItem}>🤖 Agents: {gameState.agents.filter(a => a.isAlive).length}</span>
@@ -246,18 +248,14 @@ function App() {
                     </div>
 
                     <div style={styles.gridBoard}>
-                        {/* 1. 渲染基础网格 */}
                         {grid}
 
-                        {/* 2. 【新增】悬浮渲染 Agents 层 */}
+                        {/* 悬浮 Agents 层 */}
                         {gameState.agents.filter(a => a.isAlive).map(agent => {
-                            // 动态计算位置：Padding(10) + 坐标 * (Size(25) + Gap(2))
                             const leftPos = 10 + agent.x * 27;
                             const topPos = 10 + agent.y * 27;
-
                             const hasAxe = agent.inventory && agent.inventory.Axe > 0;
 
-                            // 合并样式：基础悬浮 + Agent类型 + 武器发光 + 坐标定位
                             const agentFinalStyle = {
                                 ...styles.floatingAgent,
                                 ...styles.agent,
@@ -267,7 +265,7 @@ function App() {
                             };
 
                             return (
-                                <div key={agent.id} style={agentFinalStyle} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
+                                <div key={`agent-${agent.id}`} style={agentFinalStyle} title={`Agent: ${agent.name}\nHP: ${agent.lifespan}`}>
                                     {hasAxe ? '🪓' : '🤖'}
                                     <span style={styles.agentHp}>{agent.lifespan}</span>
                                 </div>
@@ -276,7 +274,6 @@ function App() {
                     </div>
                 </div>
 
-                {/* 右侧：日志控制台 */}
                 <div style={styles.logSection}>
                     <h3 style={styles.logHeader}>System Logs</h3>
                     <div style={styles.logContainer} ref={logContainerRef}>
@@ -293,7 +290,6 @@ function App() {
                         )}
                     </div>
                 </div>
-
             </div>
         </div>
     );

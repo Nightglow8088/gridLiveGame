@@ -30,7 +30,7 @@ public class GameLoopService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Random random = new Random();
 
-    // 日志队列
+    // 日志队列 (线程安全)
     private final LinkedList<String> logHistory = new LinkedList<>();
 
     public List<String> getLatestLogs() {
@@ -45,24 +45,26 @@ public class GameLoopService {
         }
     }
 
-    // 修改 1: 频率改为 2000ms (2秒)，配合前端动画
+    // 每 2 秒执行一次
     @Scheduled(fixedRate = 2000)
     public void runGameTurn() {
         log("----- 新回合开始 -----");
         int hpCost = liveDataService.getHpCostPerTurn();
 
-        // 0. 维护世界：确保有出口
+        // 0. 维护世界
         checkAndRespawnExits();
 
         List<Agent> agents = agentRepository.findAll();
         List<WorldResource> allResources = resourceRepository.findAll();
-        List<WorldExit> allExits = exitRepository.findAll();
+        // 获取所有出口 (转为线程安全列表)
+        List<WorldExit> allExits = Collections.synchronizedList(new ArrayList<>(exitRepository.findAll()));
 
-        // 用于批量操作的列表 (优化 IO 性能)
-        List<Agent> agentsToSave = new ArrayList<>();
-        List<Agent> agentsToDelete = new ArrayList<>();
+        // 线程安全的列表，用于收集结果
+        List<Agent> agentsToSave = Collections.synchronizedList(new ArrayList<>());
+        List<Agent> agentsToDelete = Collections.synchronizedList(new ArrayList<>());
 
-        for (Agent agent : agents) {
+        // 🔥 并行处理所有 Agent
+        agents.parallelStream().forEach(agent -> {
             boolean hasAxe = agent.getInventory().getOrDefault("Axe", 0) > 0;
 
             // =================================================
@@ -71,8 +73,9 @@ public class GameLoopService {
             int wheatCount = agent.getInventory().getOrDefault("Wheat", 0);
             if (wheatCount > 0) {
                 agent.addResource("Wheat", -1);
+                // 吃东西回血，上限100
                 agent.setLifespan(Math.min(agent.getLifespan() + 5, 100));
-                log("🍞 " + agent.getName() + " 进食回血 (HP=" + agent.getLifespan() + ")");
+                log("🍞 " + agent.getName() + " 进食 (HP=" + agent.getLifespan() + ")");
             } else {
                 agent.setLifespan(agent.getLifespan() - hpCost);
             }
@@ -80,38 +83,40 @@ public class GameLoopService {
             if (agent.getLifespan() <= 0) {
                 log("💀 " + agent.getName() + (hasAxe ? " 带着斧头遗憾离世。" : " 饿死了。"));
                 agentsToDelete.add(agent);
-                continue;
+                return; // 结束当前 Agent 逻辑
             }
 
             // =================================================
-            // 2. 视野逻辑 (修复: 找回丢失的 resourceUnderFeet 定义)
+            // 2. 视野逻辑 (Vision)
             // =================================================
             List<String> visibleItems = new ArrayList<>();
-            WorldResource resourceUnderFeet = null; // <--- 这里定义了
+            final WorldResource[] resourceUnderFeetWrapper = {null};
 
-            // A. 找资源 (3x3)
+            // A. 找资源
             for (WorldResource res : allResources) {
                 int dx = Math.abs(res.getX() - agent.getX());
                 int dy = Math.abs(res.getY() - agent.getY());
                 if (dx == 0 && dy == 0) {
                     visibleItems.add("STANDING_ON RESOURCE " + res.getType());
-                    resourceUnderFeet = res;
+                    resourceUnderFeetWrapper[0] = res;
                 } else if (dx <= 1 && dy <= 1) {
                     visibleItems.add(res.getType() + " at (" + res.getX() + "," + res.getY() + ")");
                 }
             }
 
-            // B. 找出口 (持有斧头时视野变为 10x10)
+            // B. 找出口 (🔥 优化：没斧头时稍微“屏蔽”远处出口，防止诱惑)
             int visionRange = hasAxe ? 5 : 1;
-            for (WorldExit exit : allExits) {
-                int dx = Math.abs(exit.getX() - agent.getX());
-                int dy = Math.abs(exit.getY() - agent.getY());
-
-                if (dx == 0 && dy == 0) {
-                    visibleItems.add("STANDING_ON EXIT");
-                } else if (dx <= visionRange && dy <= visionRange) {
-                    if (hasAxe || (dx <= 1 && dy <= 1)) {
-                        visibleItems.add("EXIT at (" + exit.getX() + "," + exit.getY() + ")");
+            synchronized (allExits) {
+                for (WorldExit exit : allExits) {
+                    int dx = Math.abs(exit.getX() - agent.getX());
+                    int dy = Math.abs(exit.getY() - agent.getY());
+                    if (dx == 0 && dy == 0) {
+                        visibleItems.add("STANDING_ON EXIT");
+                    } else if (dx <= visionRange && dy <= visionRange) {
+                        // 只有当持有斧头，或者是贴脸(距离<=1)时，才告诉它这里有门
+                        if (hasAxe || (dx <= 1 && dy <= 1)) {
+                            visibleItems.add("EXIT at (" + exit.getX() + "," + exit.getY() + ")");
+                        }
                     }
                 }
             }
@@ -119,70 +124,74 @@ public class GameLoopService {
             String envDescription = visibleItems.isEmpty() ? "Nothing nearby" : "You see: " + String.join(", ", visibleItems);
 
             // =================================================
-            // 3. 构建 Prompt (修复: 找回丢失的 agentState 定义)
+            // 3. 构建 Prompt (🔥 核心修改：增加优先级逻辑)
             // =================================================
             String instructions;
             if (hasAxe) {
-                instructions = "URGENT: You have an Axe! MOVE to the 'EXIT' coordinates immediately! Do NOT stay at edges.";
+                // 有斧头：唯一目标是逃生
+                instructions = "STATE: ARMED WITH AXE. " +
+                        "OBJECTIVE: ESCAPE IMMEDIATELY. " +
+                        "ACTION: MOVE towards the nearest 'EXIT' coordinates. Ignore resources.";
             } else {
-                instructions = "Goal: Survive. Harvest Wheat. Craft Axe (need 2 Stone). EXPLORE THE CENTER OF MAP, do not hug walls.";
+                // 没斧头：生存 > 采集 > 合成。严禁去出口。
+                instructions = "STATE: UNARMED (No Axe). You CANNOT escape yet. " +
+                        "PRIORITY ORDER: " +
+                        "1. SURVIVE: If HP < 30 and you see Wheat, HARVEST it immediately. " +
+                        "2. GATHER: If you see Stone, HARVEST it (Need 2 Stone to Craft Axe). " +
+                        "3. CRAFT: If you have 2 Stone, CRAFT Axe. " +
+                        "4. EXPLORE: Move to find resources. " +
+                        "WARNING: Do NOT go to 'EXIT' locations yet, you will fail without an Axe.";
             }
 
-            // <--- 这里定义了 agentState
             String agentState = String.format("""
                 {
                     "id": "%s", "hp": %d, "inventory": %s,
                     "loc": {"x": %d, "y": %d},
-                    "grid": "20x20. (0,0) Top-Left. y+ is DOWN.",
+                    "grid": "20x20",
                     "vision": "%s",
                     "instruction": "%s"
                 }
                 """, agent.getName(), agent.getLifespan(), agent.getInventory(), agent.getX(), agent.getY(), envDescription, instructions);
 
             try {
-                // 4. AI 决策
+                // 4. AI 决策 (并行执行)
                 String aiResponseJson = aiService.getAgentDecision(agentState);
                 JsonNode decision = objectMapper.readTree(aiResponseJson);
                 String action = decision.has("action") ? decision.get("action").asText() : "WAIT";
 
                 // 5. 执行动作
-                executeAction(agent, action, decision, resourceUnderFeet, agents, hasAxe);
+                executeAction(agent, action, decision, resourceUnderFeetWrapper[0], agents, hasAxe);
 
                 // =================================================
-                // 6. 自动逃生检测
+                // 6. 自动逃生检测 (需加锁)
                 // =================================================
                 boolean escaped = false;
-                for (WorldExit exit : allExits) {
-                    // 检查坐标重合 + 有斧头
-                    if (exit.getX() == agent.getX() && exit.getY() == agent.getY() && hasAxe) {
-                        log("🚀🚀🚀 " + agent.getName() + " 成功带着斧头逃离了矩阵！(HP=" + agent.getLifespan() + ")");
+                synchronized (allExits) {
+                    for (WorldExit exit : allExits) {
+                        if (exit.getX() == agent.getX() && exit.getY() == agent.getY() && hasAxe) {
+                            log("🚀🚀🚀 " + agent.getName() + " 成功逃离矩阵！");
 
-                        // 标记删除
-                        agentsToDelete.add(agent);
-                        exitRepository.delete(exit);
+                            agentsToDelete.add(agent);
+                            exitRepository.delete(exit);
+                            allExits.remove(exit);
 
-                        // 内存操作：从当前回合的 exits 列表中移除
-                        allExits.remove(exit);
-
-                        escaped = true;
-                        break;
+                            escaped = true;
+                            break;
+                        }
                     }
                 }
 
-                if (escaped) continue;
-
-                // 没死也没逃走，加入待保存列表
-                agentsToSave.add(agent);
+                if (!escaped) {
+                    agentsToSave.add(agent);
+                }
 
             } catch (Exception e) {
-                System.err.println("AI Error: " + e.getMessage());
-                // 即使出错，状态可能也变了，也需要保存
-                agentsToSave.add(agent);
+                agentsToSave.add(agent); // 出错也保存(可能扣血了)
             }
-        }
+        });
 
         // =================================================
-        // 修改 2: 批量数据库操作 (减少 IO 消耗)
+        // 7. 批量数据库操作 (主线程)
         // =================================================
         if (!agentsToDelete.isEmpty()) {
             agentRepository.deleteAll(agentsToDelete);
@@ -191,12 +200,12 @@ public class GameLoopService {
             agentRepository.saveAll(agentsToSave);
         }
 
-        // 7. 生态维护
+        // 8. 生态维护
         checkAndRespawnAgents();
         checkAndRespawnResources();
         checkAndRespawnExits();
 
-        System.out.println("----- 回合结束 -----\n");
+        System.out.println("----- 回合结算完成 -----\n");
     }
 
     // --- 动作执行 ---
@@ -213,7 +222,8 @@ public class GameLoopService {
 
                 if (isValidMove(newX, newY) && !isOccupied(newX, newY, allAgents)) {
                     agent.setX(newX); agent.setY(newY);
-                    if (hasAxe) log("🏃 " + agent.getName() + " (持斧) -> " + dir + " (" + newX + "," + newY + ")");
+                    // 无论是否有斧头，都记录移动日志
+                    log("🏃 " + agent.getName() + " -> " + dir + " (" + newX + "," + newY + ")");
                 } else {
                     forceSmartRandomMove(agent, allAgents);
                 }
@@ -226,10 +236,14 @@ public class GameLoopService {
                 }
             }
             case "CRAFT" -> {
+                // 检查是否满足合成条件
                 if (agent.getInventory().getOrDefault("Stone", 0) >= 2) {
                     agent.addResource("Stone", -2);
                     agent.addResource("Axe", 1);
                     log("🔨 " + agent.getName() + " 打造出了传说之斧! 快去找出口！");
+                } else {
+                    // 如果 AI 乱尝试 CRAFT 但材料不够，可以选择打印日志或忽略
+                    // log("⚠️ " + agent.getName() + " 试图合成斧头但石头不够。");
                 }
             }
         }
@@ -284,31 +298,23 @@ public class GameLoopService {
         return false;
     }
 
-    // 🔥 核心改进：彻底防止边缘卡死
     private void forceSmartRandomMove(Agent agent, List<Agent> allAgents) {
         int currentX = agent.getX();
         int currentY = agent.getY();
-
-        // 0:UP, 1:DOWN, 2:LEFT, 3:RIGHT
         int[] dx = {0, 0, -1, 1};
         int[] dy = {-1, 1, 0, 0};
-
         List<Integer> directions = new ArrayList<>();
 
-        // 🔥 彻底移除无效方向：如果在边缘，根本不把撞墙的方向加入候选列表
-        if (currentY > 0) directions.add(0);  // UP (只有不在最上面才能往上)
-        if (currentY < 19) directions.add(1); // DOWN
-        if (currentX > 0) directions.add(2);  // LEFT
-        if (currentX < 19) directions.add(3); // RIGHT
+        if (currentY > 0) directions.add(0);
+        if (currentY < 19) directions.add(1);
+        if (currentX > 0) directions.add(2);
+        if (currentX < 19) directions.add(3);
 
-        // 打乱顺序，实现随机选择
         Collections.shuffle(directions);
 
-        // 尝试移动
         for (int dirIndex : directions) {
             int tryX = currentX + dx[dirIndex];
             int tryY = currentY + dy[dirIndex];
-
             if (isValidMove(tryX, tryY) && !isOccupied(tryX, tryY, allAgents)) {
                 agent.setX(tryX);
                 agent.setY(tryY);
